@@ -1,107 +1,121 @@
 # Velocity-Blockchain: architecture
 
-Status: design + off-chain netting engine. The Soroban contract, backend and
-frontend are not built yet.
+Status: contract, netting engine, testnet end-to-end script and a demo UI are
+built. Not deployed anywhere but testnet. No real cash-out partners yet.
 
-## What this system saves, and where
+## The idea
 
-Stellar is one global ledger. Moving an asset between two accounts costs a
-fraction of a cent whatever the countries involved, so there is no cross-border
-fee to net away on-chain. The real cost sits in the **conversion**: sending
-USDC and having the recipient receive another asset means crossing the SDEX /
-AMM pools (spread + slippage), or paying a liquidity provider's margin.
-
-Netting removes that cost for the part of the flow that offsets:
+When someone sends money to another country, they can choose to wait a number
+of hours. Their USDC is locked in a contract. While it waits, the system looks
+for people sending money the other way. For a matched amount:
 
 ```
-Alice: sells USDC, recipient should get EURC
-Bob:   sells EURC, recipient should get USDC
+Alice (CA) sends 100 to Bob (IN)      Carol (IN) sends 60 to Dave (CA)
+
+Matched 60:   Alice's deposit pays Dave, Carol's deposit pays Bob, straight away.
+              Both of those payouts are local: Alice and Dave are in Canada,
+              Carol and Bob in India.
+Remainder 40: at the deadline it goes across to Bob (or back to Alice, if she
+              chose a refund).
 ```
 
-Without netting, both trade through the DEX and each pays spread and slippage.
-With netting, Alice's USDC goes to Bob's recipient and Bob's EURC goes to
-Alice's recipient, at one oracle reference rate minus a small fee. The matched
-amount never touches a pool. Only the unmatched remainder is routed through a
-Stellar path payment (or refunded), according to the sender's choice.
+Everything is USDC, 1:1. There is no exchange rate, no oracle and no DEX in the
+contract.
 
-Savings per matched unit = (DEX cost the sender would have paid) - (netting fee).
-The DEX cost varies with pool depth, so the engine takes it as an input and
-labels the result an estimate. Measure it against real path-payment quotes
-before claiming a number.
+## Where the saving really is
 
-## Why not CAD <-> INR first
+On Stellar, moving USDC between two accounts costs a fraction of a cent wherever
+they are, so the on-chain transfer itself is not the expensive part. The cost
+and the liquidity problem sit at the edges: turning local currency into USDC,
+and USDC back into local currency, through agents or anchors. A matched amount
+can be paid out from money that came in locally, so it skips the currency
+conversion and the agent never has to rebalance across the border for it. That
+is the "kept local" figure the engine and the UI report.
 
-Checked against the Stellar stablecoin index (Scout, data as of 2026-11-10):
-
-- No INR-pegged stablecoin is tracked among the 41 listed.
-- The only CAD one, C1CAD, shows about $21M cap, 4 holders, no 24h volume.
-- USD and EUR are the liquid pairs: USDC (about 2.5M holders) and EURC
-  (about 52k holders on the main issuer).
-
-The engine is asset-agnostic (any SEP-41 / classic asset pair), but the first
-corridor should be **USDC <-> EURC** on Testnet, where both sides exist and a
-path-payment baseline can actually be quoted. Add corridors as local stablecoins
-appear; Reflector and RedStone both publish SEP-40 price feeds for several
-fiat-pegged Stellar assets.
+This only pays off once payouts go through local cash-out agents (anchors).
+With recipients just holding USDC in a wallet, matching moves the same amounts
+on-chain. The next step is wiring payouts to anchors (SEP-24 / SEP-31); see
+"Next" below.
 
 ## Components
 
 | Piece | Where | Status |
 |---|---|---|
-| Netting engine (matching, FIFO, partial/full/instant, fallbacks, savings estimate) | `engine/netting` | built, 20 tests passing |
-| Escrow + settlement contract (Soroban, Rust, SDK 29) | `contracts/escrow` | built, 14 tests passing, wasm builds (14.7 KB); not deployed |
-| Rate source: SEP-40 oracle (Reflector) | read by the contract (`lastprice`) | tested against a mock only; real feed not checked |
-| Backend API + order book (FastAPI, Postgres) | `backend/` | not started |
-| Path-payment router for remainders (stellar-sdk) | `backend/` | not started |
-| Frontend (Next.js + Freighter) | `frontend/` | not started |
+| Escrow contract (Soroban, Rust, SDK 29) | `contracts/escrow` | 16 tests pass |
+| Netting engine (Python, pure) | `engine/netting` | 19 tests pass |
+| Engine CLI used by the app | `engine/match_cli.py` | built |
+| Testnet end-to-end script | `scripts/e2e_testnet.sh` | built |
+| Demo app (Node server + browser page) | `app/` | built, testnet only, custodial demo keys |
+| Anchor / cash-out integration | | not started |
 
 ### Trust split
 
 - **Contract** custodies funds and is the only thing that moves them. It
-  re-checks every fill: opposite directions, rate within a tolerance of the
-  oracle, each side's signed `min_receive`, balances, deadlines. A buggy or
-  malicious backend can then only fail to match, never take funds.
-- **Engine / backend** finds matches and proposes them. It holds no funds.
-- **Order book** lives off-chain; only escrowed balances and fills are on-chain.
+  re-checks every match: opposite corridors, both orders open and within their
+  deadline, amount within both remainders. Payouts only go to addresses the
+  senders signed. The fee is fixed at deployment.
+- **Settler** (the backend's key) can only choose which orders to pair and how
+  much. It cannot redirect funds.
+- **Release is permissionless.** Once an order's deadline is reached anyone can
+  call `release`, and the remainder goes where the sender said. Funds do not
+  depend on the backend staying up.
 
 ### Order lifecycle
 
-1. Sender signs an order: sell asset, buy asset, amount, `min_receive`,
-   recipient, mode (INSTANT / PARTIAL / FULL), max wait, fallback.
-2. Sender deposits the sell asset into escrow.
-3. Engine matches at the oracle rate; contract executes each fill atomically.
-4. At the deadline the remainder goes to the fallback: path payment through the
-   DEX with the pro-rata `min_receive` as `destMin`, or a refund.
+1. Sender calls `deposit(owner, recipient, from_region, to_region, amount,
+   deadline, full, on_expiry)`. The USDC moves into the escrow.
+2. While `now <= deadline`, the settler calls `settle_batch` with pairs the
+   engine proposed. Each pair pays both recipients `amount - fee` immediately.
+3. Once `now >= deadline`, anyone calls `release`: the remainder goes to the
+   recipient (`SendRemainder`) or back to the sender (`Refund`).
+4. The owner can `cancel` at any time to take back the unmatched remainder.
 
-## Engine rules (implemented)
+Statuses: `Open`, `Filled` (fully matched), `Released` (remainder sent),
+`Cancelled` (remainder refunded).
 
-- Integers only, 7 decimals; rate is B per A scaled by 10^7.
+## Engine rules
+
+- Integers only, 7 decimals (stroops).
 - FIFO by `(created_at, id)`; deterministic.
-- Fee is taken from what each side receives, rounded up (rounding favours the pool).
-- Each side's `min_receive` is enforced pro rata per fill with exact integer math.
+- Fee is per matched side, rounded up, same formula as the contract.
 - FULL orders are all-or-nothing; the allocation is recomputed without any FULL
   order that ends up partly filled, until stable.
-- Each order gets one last match at its deadline before fallback; the remainder
-  is closed in the same step so it cannot be routed or refunded twice.
-- Conservation holds exactly per asset: amount in = amount out + fee.
+- Each order gets one last matching pass at its deadline before it is closed.
+- Conservation is exact: every stroop is matched, released, refunded or still
+  waiting.
+
+## Testing
+
+- `cd contracts && cargo test` and
+  `cd engine && python3 -I -m unittest discover -s tests -t .`: unit tests.
+- `scripts/e2e_testnet.sh`: runs both suites, builds the wasm, deploys to
+  testnet with fresh accounts and a test USDC, runs a 100-vs-60 two-way
+  transfer and checks every balance. About 4-6 minutes, mostly testnet
+  latency and the wait window. `scripts/e2e_testnet.sh local` works against a
+  Quickstart container if Docker is installed.
+- Testnet is reset a few times a year (next: 2026-12-16). Both the script and
+  `app/setup.sh` create everything from scratch, so just rerun them.
+- `stellar/stellar-demo-wallet` is a manual tool for anchor flows (SEP-6/24/31).
+  It does not call Soroban contracts, so it becomes useful once payouts go
+  through an anchor, e.g. against `testanchor.stellar.org`.
 
 ## Known limits
 
-- Matching is bilateral per pair; no multi-hop cycles.
-- One reference rate per matching pass; no per-order price improvement.
-- No compliance layer. Moving value for other people can be a regulated
-  activity; get legal advice before any real-money use.
-- The engine has not been run against the contract or Testnet yet, and the
-  contract has not been pointed at a real oracle. Testnet is on protocol 30
-  (checked 2026-11-10); the contract is built with soroban-sdk 29, the latest
-  stable release, which the Stellar skills say targets protocol 29.
-- The DEX fallback is client-side in v1: the sender calls `cancel` to get the
-  remainder back, then the app submits a path payment. A contract cannot submit
-  classic path-payment operations.
-- A fill reverts if a recipient has no trustline for the asset it receives.
-  The app must check trustlines before creating an order.
-- Mode FULL is enforced on-chain only within one `settle_batch`. A FULL order
-  has to be completed by a single batch.
-- Settlement is decided by the contract's own oracle rate, so the engine's rate
-  and the contract's can differ slightly between ticks. The engine proposes
-  pairs and sizes; the contract decides the amounts.
+- Matching is bilateral per corridor; no multi-hop cycles (CA→IN→MX→CA).
+- `full` is enforced on-chain only within one `settle_batch`.
+- Instant transfers still wait about 30 seconds in the app, so the deposit can
+  land and get one matching pass.
+- A recipient needs a USDC trustline or the payout reverts. The app must check
+  this before creating an order.
+- Order storage lives 60 days from its last write. Very long waits would need a
+  TTL bump.
+- No compliance layer. Moving value for other people is a regulated activity;
+  get legal advice and licensed partners before any real-money use.
+
+## Next
+
+1. Payouts through anchors in each country (SEP-31 receive side, or SEP-24
+   withdrawals), so matched amounts become local cash.
+2. Non-custodial sending: senders sign in their own wallet (Freighter / Stellar
+   Wallets Kit) instead of the demo server holding keys.
+3. Pick the first corridor based on where cash-out partners exist on both ends.

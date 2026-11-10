@@ -1,22 +1,24 @@
-//! Netting escrow.
+//! Two-way USDC netting escrow.
 //!
-//! Holds sell-side tokens for orders and settles bilateral fills between
-//! opposite-direction orders (X sells A for B, Y sells B for A). The contract,
-//! not the backend, derives the rate (from a SEP-40 oracle), computes the
-//! amounts and fees, and enforces every sender's signed `min_receive`. The
-//! settler role can only choose *which* orders to pair and *how much* of A to
-//! move; it can never redirect funds or push a sender below their floor.
+//! Senders lock USDC for a recipient in another region (e.g. CA -> IN) and
+//! choose how long to wait. While an order is open, the settler can pair it
+//! with orders flowing the opposite way (IN -> CA). A matched amount pays both
+//! recipients straight away: X's deposit covers Y's recipient, who is in X's
+//! region, and the other way round, so that part of each payment can be paid
+//! out from local liquidity and never has to cross the border. Whatever is
+//! still unmatched at the deadline goes to the recipient (the cross-border leg)
+//! or back to the sender, as the sender chose when depositing.
 //!
-//! Mirrors `engine/netting/engine.py`: integer math, 7-decimal fixed point,
-//! fees rounded up, floors checked by exact cross-multiplication.
+//! One token, 1:1: no oracle, no exchange rate, no DEX. The settler only
+//! chooses *which* orders to pair and *how much*; every payout goes to an
+//! address the sender signed, and the fee is fixed at deployment.
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractevent, contractimpl, contracttype,
-    panic_with_error, token, Address, Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, token,
+    Address, Env, Symbol, Vec,
 };
 
-pub const SCALE: i128 = 10_000_000;
 pub const BPS: i128 = 10_000;
 
 const DAY: u32 = 17_280; // ledgers per day (~5s)
@@ -29,35 +31,13 @@ const BUMP_TO: u32 = 60 * DAY;
 pub enum Error {
     NotFound = 1,
     NotOpen = 2,
-    PairMismatch = 3,
+    CorridorMismatch = 3,
     Expired = 4,
     BadAmount = 5,
-    LimitNotMet = 6,
-    OraclePrice = 7,
-    FullNotMet = 8,
-    Overflow = 9,
-    BadConfig = 10,
-}
-
-// ---- SEP-40 oracle interface (consumer side) -----------------------------
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OracleAsset {
-    Stellar(Address),
-    Other(Symbol),
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PriceData {
-    pub price: i128,
-    pub timestamp: u64,
-}
-
-#[contractclient(name = "OracleClient")]
-pub trait PriceFeed {
-    fn lastprice(env: Env, asset: OracleAsset) -> Option<PriceData>;
+    NotExpired = 6,
+    FullNotMet = 7,
+    Overflow = 8,
+    BadConfig = 9,
 }
 
 // ---- storage -------------------------------------------------------------
@@ -67,7 +47,6 @@ pub trait PriceFeed {
 pub enum Key {
     Config,
     NextId,
-    OracleAsset(Address),
     Order(u64),
 }
 
@@ -77,17 +56,25 @@ pub struct Config {
     pub admin: Address,
     pub settler: Address,
     pub treasury: Address,
-    pub oracle: Address,
-    pub fee_bps: u32,
-    pub max_oracle_age: u64, // seconds
+    pub token: Address, // USDC
+    pub fee_bps: u32,   // charged on matched amounts only, per side
+}
+
+/// What happens to the unmatched part when the wait runs out.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnExpiry {
+    SendRemainder, // send it across to the recipient
+    Refund,        // return it to the sender
 }
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Status {
     Open,
-    Filled,
-    Cancelled,
+    Filled,    // fully matched
+    Released,  // remainder sent to the recipient at the deadline
+    Cancelled, // remainder refunded to the sender
 }
 
 #[contracttype]
@@ -95,22 +82,22 @@ pub enum Status {
 pub struct Order {
     pub owner: Address,
     pub recipient: Address,
-    pub sell_token: Address,
-    pub buy_token: Address,
+    pub from_region: Symbol, // where the sender is, e.g. "CA"
+    pub to_region: Symbol,   // where the recipient is, e.g. "IN"
     pub amount: i128,
     pub remaining: i128,
-    pub min_receive: i128, // floor for the whole order, in buy_token stroops
-    pub deadline: u64,
-    pub full: bool, // all-or-nothing within one settle_batch
+    pub deadline: u64, // last second the order may be matched
+    pub full: bool,    // all-or-nothing within one settle_batch
+    pub on_expiry: OnExpiry,
     pub status: Status,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FillReq {
-    pub x_id: u64, // sells A, buys B
-    pub y_id: u64, // sells B, buys A
-    pub a_amount: i128,
+    pub x_id: u64,
+    pub y_id: u64, // must flow the opposite way to x
+    pub amount: i128,
 }
 
 // ---- events --------------------------------------------------------------
@@ -120,17 +107,27 @@ pub struct Deposited {
     #[topic]
     pub order_id: u64,
     pub owner: Address,
+    pub from_region: Symbol,
+    pub to_region: Symbol,
     pub amount: i128,
 }
 
 #[contractevent]
-pub struct Filled {
+pub struct Matched {
     #[topic]
     pub x_id: u64,
     #[topic]
     pub y_id: u64,
-    pub a_amount: i128,
-    pub b_amount: i128,
+    pub amount: i128,
+    pub fee: i128, // per side
+}
+
+#[contractevent]
+pub struct Released {
+    #[topic]
+    pub order_id: u64,
+    pub to: Address,
+    pub amount: i128,
 }
 
 #[contractevent]
@@ -156,35 +153,14 @@ fn save_order(env: &Env, id: u64, order: &Order) {
     env.storage().persistent().extend_ttl(&key, BUMP_THRESHOLD, BUMP_TO);
 }
 
-fn ceil_div(n: i128, d: i128) -> i128 {
-    (n + d - 1) / d
-}
-
-fn oracle_price(env: &Env, cfg: &Config, token: &Address) -> Result<i128, Error> {
-    let asset: OracleAsset = env
-        .storage()
-        .instance()
-        .get(&Key::OracleAsset(token.clone()))
-        .unwrap_or(OracleAsset::Stellar(token.clone()));
-    let p = OracleClient::new(env, &cfg.oracle)
-        .lastprice(&asset)
-        .ok_or(Error::OraclePrice)?;
-    let now = env.ledger().timestamp();
-    if p.price <= 0 || (now > p.timestamp && now - p.timestamp > cfg.max_oracle_age) {
-        return Err(Error::OraclePrice);
-    }
-    Ok(p.price)
-}
-
-/// B per A, scaled by SCALE, from two oracle prices quoted in the same base.
-fn rate(env: &Env, cfg: &Config, sell: &Address, buy: &Address) -> Result<i128, Error> {
-    let pa = oracle_price(env, cfg, sell)?;
-    let pb = oracle_price(env, cfg, buy)?;
-    pa.checked_mul(SCALE).ok_or(Error::Overflow).map(|n| n / pb)
+/// Fee on one side of a match, rounded up so rounding never shorts the treasury.
+fn fee_for(amount: i128, fee_bps: u32) -> Result<i128, Error> {
+    let n = amount.checked_mul(fee_bps as i128).ok_or(Error::Overflow)?;
+    Ok((n + BPS - 1) / BPS)
 }
 
 fn settle_one(env: &Env, cfg: &Config, f: &FillReq) -> Result<(), Error> {
-    if f.a_amount <= 0 {
+    if f.amount <= 0 || f.x_id == f.y_id {
         return Err(Error::BadAmount);
     }
     let mut x = load_order(env, f.x_id)?;
@@ -192,66 +168,42 @@ fn settle_one(env: &Env, cfg: &Config, f: &FillReq) -> Result<(), Error> {
     if x.status != Status::Open || y.status != Status::Open {
         return Err(Error::NotOpen);
     }
-    if x.sell_token != y.buy_token || x.buy_token != y.sell_token {
-        return Err(Error::PairMismatch);
+    if x.from_region != y.to_region || x.to_region != y.from_region {
+        return Err(Error::CorridorMismatch);
     }
     let now = env.ledger().timestamp();
     if now > x.deadline || now > y.deadline {
         return Err(Error::Expired);
     }
-    if f.a_amount > x.remaining {
+    let m = f.amount;
+    if m > x.remaining || m > y.remaining {
+        return Err(Error::BadAmount);
+    }
+    let fee = fee_for(m, cfg.fee_bps)?;
+    let paid = m - fee;
+    if paid <= 0 {
         return Err(Error::BadAmount);
     }
 
-    let r = rate(env, cfg, &x.sell_token, &x.buy_token)?;
-    let a = f.a_amount;
-    let b = a.checked_mul(r).ok_or(Error::Overflow)? / SCALE;
-    if b <= 0 || b > y.remaining {
-        return Err(Error::BadAmount);
-    }
-
-    let fee = cfg.fee_bps as i128;
-    let fee_a = ceil_div(a.checked_mul(fee).ok_or(Error::Overflow)?, BPS);
-    let fee_b = ceil_div(b.checked_mul(fee).ok_or(Error::Overflow)?, BPS);
-    let x_recv = b - fee_b; // x receives B
-    let y_recv = a - fee_a; // y receives A
-    if x_recv <= 0 || y_recv <= 0 {
-        return Err(Error::BadAmount);
-    }
-
-    // Signed floors, pro rata to what each side sells in this fill.
-    let x_ok = x_recv.checked_mul(x.amount).ok_or(Error::Overflow)?
-        >= x.min_receive.checked_mul(a).ok_or(Error::Overflow)?;
-    let y_ok = y_recv.checked_mul(y.amount).ok_or(Error::Overflow)?
-        >= y.min_receive.checked_mul(b).ok_or(Error::Overflow)?;
-    if !x_ok || !y_ok {
-        return Err(Error::LimitNotMet);
-    }
-
-    x.remaining -= a;
-    y.remaining -= b;
+    x.remaining -= m;
+    y.remaining -= m;
     if x.remaining == 0 {
         x.status = Status::Filled;
     }
     if y.remaining == 0 {
         y.status = Status::Filled;
     }
-
-    let me = env.current_contract_address();
-    let token_a = token::Client::new(env, &x.sell_token);
-    let token_b = token::Client::new(env, &x.buy_token);
-    token_a.transfer(&me, &y.recipient, &y_recv);
-    token_b.transfer(&me, &x.recipient, &x_recv);
-    if fee_a > 0 {
-        token_a.transfer(&me, &cfg.treasury, &fee_a);
-    }
-    if fee_b > 0 {
-        token_b.transfer(&me, &cfg.treasury, &fee_b);
-    }
-
     save_order(env, f.x_id, &x);
     save_order(env, f.y_id, &y);
-    Filled { x_id: f.x_id, y_id: f.y_id, a_amount: a, b_amount: b }.publish(env);
+
+    let me = env.current_contract_address();
+    let usdc = token::Client::new(env, &cfg.token);
+    usdc.transfer(&me, &y.recipient, &paid); // funded by x, paid in x's region
+    usdc.transfer(&me, &x.recipient, &paid); // funded by y, paid in y's region
+    if fee > 0 {
+        usdc.transfer(&me, &cfg.treasury, &(fee * 2));
+    }
+    Matched { x_id: f.x_id, y_id: f.y_id, amount: m, fee }.publish(env);
     Ok(())
 }
 
@@ -267,40 +219,41 @@ impl NettingEscrow {
         admin: Address,
         settler: Address,
         treasury: Address,
-        oracle: Address,
+        token: Address,
         fee_bps: u32,
-        max_oracle_age: u64,
     ) {
         if fee_bps >= BPS as u32 {
             panic_with_error!(&env, Error::BadConfig);
         }
-        env.storage().instance().set(
-            &Key::Config,
-            &Config { admin, settler, treasury, oracle, fee_bps, max_oracle_age },
-        );
+        env.storage()
+            .instance()
+            .set(&Key::Config, &Config { admin, settler, treasury, token, fee_bps });
         env.storage().instance().set(&Key::NextId, &0u64);
     }
 
-    /// Lock `amount` of `sell_token` and open an order. Returns the order id.
+    /// Lock `amount` USDC for `recipient` and open an order. A `deadline` equal
+    /// to the current time means "instant": match against what is open now,
+    /// then release. Returns the order id.
     pub fn deposit(
         env: Env,
         owner: Address,
         recipient: Address,
-        sell_token: Address,
-        buy_token: Address,
+        from_region: Symbol,
+        to_region: Symbol,
         amount: i128,
-        min_receive: i128,
         deadline: u64,
         full: bool,
+        on_expiry: OnExpiry,
     ) -> Result<u64, Error> {
         owner.require_auth();
-        if amount <= 0 || min_receive < 0 || sell_token == buy_token {
+        if amount <= 0 || from_region == to_region {
             return Err(Error::BadAmount);
         }
-        if deadline <= env.ledger().timestamp() {
+        if deadline < env.ledger().timestamp() {
             return Err(Error::Expired);
         }
-        token::Client::new(&env, &sell_token).transfer(
+        let cfg = config(&env);
+        token::Client::new(&env, &cfg.token).transfer(
             &owner,
             &env.current_contract_address(),
             &amount,
@@ -315,22 +268,22 @@ impl NettingEscrow {
             &Order {
                 owner: owner.clone(),
                 recipient,
-                sell_token,
-                buy_token,
+                from_region: from_region.clone(),
+                to_region: to_region.clone(),
                 amount,
                 remaining: amount,
-                min_receive,
                 deadline,
                 full,
+                on_expiry,
                 status: Status::Open,
             },
         );
-        Deposited { order_id: id, owner, amount }.publish(&env);
+        Deposited { order_id: id, owner, from_region, to_region, amount }.publish(&env);
         Ok(id)
     }
 
-    /// Settle fills atomically. Only the settler may call; every fill is
-    /// re-validated here. If any fill or any `full` constraint fails, the whole
+    /// Settle matches atomically. Only the settler may call; every match is
+    /// re-validated here. If any match or any `full` constraint fails, the whole
     /// batch reverts.
     pub fn settle_batch(env: Env, fills: Vec<FillReq>) -> Result<(), Error> {
         let cfg = config(&env);
@@ -351,8 +304,44 @@ impl NettingEscrow {
         Ok(())
     }
 
-    /// Owner withdraws whatever is still unmatched. Used for refunds and for
-    /// the DEX fallback (the app then routes the funds with a path payment).
+    /// Once the deadline is reached, anyone may close the order: the unmatched
+    /// remainder goes to the recipient or back to the owner, as the owner chose.
+    /// Permissionless so funds never depend on the backend staying up; the
+    /// destination is fixed by the order, so the caller cannot redirect it.
+    pub fn release(env: Env, order_id: u64) -> Result<i128, Error> {
+        let mut o = load_order(&env, order_id)?;
+        if o.status != Status::Open {
+            return Err(Error::NotOpen);
+        }
+        if env.ledger().timestamp() < o.deadline {
+            return Err(Error::NotExpired);
+        }
+        let amount = o.remaining;
+        let to = match o.on_expiry {
+            OnExpiry::SendRemainder => {
+                o.status = Status::Released;
+                o.recipient.clone()
+            }
+            OnExpiry::Refund => {
+                o.status = Status::Cancelled;
+                o.owner.clone()
+            }
+        };
+        o.remaining = 0;
+        save_order(&env, order_id, &o);
+        token::Client::new(&env, &config(&env).token).transfer(
+            &env.current_contract_address(),
+            &to,
+            &amount,
+        );
+        match o.status {
+            Status::Released => Released { order_id, to, amount }.publish(&env),
+            _ => Cancelled { order_id, refunded: amount }.publish(&env),
+        }
+        Ok(amount)
+    }
+
+    /// Owner takes back whatever is still unmatched, at any time.
     pub fn cancel(env: Env, order_id: u64) -> Result<i128, Error> {
         let mut o = load_order(&env, order_id)?;
         o.owner.require_auth();
@@ -363,13 +352,11 @@ impl NettingEscrow {
         o.remaining = 0;
         o.status = Status::Cancelled;
         save_order(&env, order_id, &o);
-        if refund > 0 {
-            token::Client::new(&env, &o.sell_token).transfer(
-                &env.current_contract_address(),
-                &o.owner,
-                &refund,
-            );
-        }
+        token::Client::new(&env, &config(&env).token).transfer(
+            &env.current_contract_address(),
+            &o.owner,
+            &refund,
+        );
         Cancelled { order_id, refunded: refund }.publish(&env);
         Ok(refund)
     }
@@ -380,18 +367,6 @@ impl NettingEscrow {
 
     pub fn get_config(env: Env) -> Config {
         config(&env)
-    }
-
-    /// Current oracle-derived rate (buy per sell, scaled by 1e7).
-    pub fn quote_rate(env: Env, sell: Address, buy: Address) -> Result<i128, Error> {
-        rate(&env, &config(&env), &sell, &buy)
-    }
-
-    /// Map a token to the oracle's own asset identifier (e.g. `Other("EUR")`).
-    /// Defaults to `Stellar(token)`.
-    pub fn set_oracle_asset(env: Env, token: Address, asset: OracleAsset) {
-        config(&env).admin.require_auth();
-        env.storage().instance().set(&Key::OracleAsset(token), &asset);
     }
 
     pub fn set_settler(env: Env, settler: Address) {

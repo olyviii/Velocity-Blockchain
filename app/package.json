@@ -1,0 +1,12 @@
+{
+  "name": "velocity-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "bash setup.sh",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "17.2.1"
+  }
+}

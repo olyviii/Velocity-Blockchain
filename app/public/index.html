@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Velocity Transfers</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #14171c; --muted: #5d6673; --line: #e3e6eb;
+    --accent: #2453d6; --accent-ink: #fff; --good: #137a4b; --good-bg: #e5f4ec;
+    --warn: #8a5a00; --warn-bg: #fdf1d8; --bad: #b42318; --bad-bg: #fde7e5; --wait: #c9d4ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --card: #171b21; --ink: #e8ebef; --muted: #98a2b0; --line: #2a3039;
+      --accent: #6d93ff; --accent-ink: #0b0e13; --good: #5fd39a; --good-bg: #13291f;
+      --warn: #f0bf5a; --warn-bg: #2d2412; --bad: #ff8a80; --bad-bg: #321715; --wait: #2c3a5c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--warn-bg); color: var(--warn); }
+  a { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 380px 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .stack > * + * { margin-top: 16px; }
+  .who { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 16px; }
+  .who button { text-align: left; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+                background: var(--card); color: var(--ink); cursor: pointer; font: inherit; }
+  .who button.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+  .who .bal { display: block; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  @media (min-width: 861px) { .who { grid-template-columns: repeat(4, 1fr); } }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input, select { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+                  background: var(--bg); color: var(--ink); font: inherit; }
+  .waits { display: flex; flex-wrap: wrap; gap: 6px; }
+  .waits button { padding: 6px 10px; border-radius: 99px; border: 1px solid var(--line); background: var(--bg);
+                  color: var(--ink); cursor: pointer; font: inherit; font-size: 13px; }
+  .waits button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .go { margin-top: 16px; width: 100%; padding: 11px; border: 0; border-radius: 10px; background: var(--accent);
+        color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
+  .go:disabled { opacity: .55; cursor: progress; }
+  .hint { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: var(--good-bg); color: var(--good); font-size: 13px; }
+  .hint.none { background: var(--bg); color: var(--muted); }
+  .err { margin-top: 10px; color: var(--bad); font-size: 13px; }
+  .order { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .order + .order { margin-top: 10px; }
+  .row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .amt { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; }
+  .Open { background: var(--warn-bg); color: var(--warn); }
+  .Filled, .Released { background: var(--good-bg); color: var(--good); }
+  .Cancelled { background: var(--bad-bg); color: var(--bad); }
+  .bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--wait); margin: 10px 0 6px; }
+  .bar .m { background: var(--good); } .bar .r { background: var(--accent); }
+  .legend { font-size: 12px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .small { font-size: 12px; color: var(--muted); }
+  .link-btn { background: none; border: 0; color: var(--bad); cursor: pointer; font: inherit; font-size: 12px; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  td.n, th.n { text-align: right; }
+  .corr { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .corr div { background: var(--bg); border-radius: 8px; padding: 10px; }
+  .corr b { display: block; font-size: 18px; font-variant-numeric: tabular-nums; }
+  .feed { max-height: 320px; overflow: auto; font-size: 13px; }
+  .feed div { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .feed .error { color: var(--bad); }
+  .empty { color: var(--muted); font-size: 13px; }
+  code { font-size: 12px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Velocity Transfers</h1>
+      <div class="sub">Send USDC across borders. Wait a little and get matched with someone sending the other way, so more of your money is paid out locally.</div>
+    </div>
+    <span class="badge" id="net">connecting…</span>
+  </header>
+
+  <div class="who" id="who"></div>
+
+  <div class="grid">
+    <div class="stack">
+      <div class="card">
+        <h2 id="sendTitle">Send money</h2>
+        <label for="to">To</label>
+        <select id="to"></select>
+        <label for="amount">Amount (USDC)</label>
+        <input id="amount" inputmode="decimal" value="100">
+        <label>How long can you wait for a match?</label>
+        <div class="waits" id="waits"></div>
+        <label for="expiry">If not fully matched in time</label>
+        <select id="expiry">
+          <option value="SendRemainder">Send the rest across anyway</option>
+          <option value="Refund">Refund the rest to me</option>
+        </select>
+        <div class="hint none" id="hint"></div>
+        <button class="go" id="go">Lock USDC and send</button>
+        <div class="err" id="err"></div>
+      </div>
+
+      <div class="card">
+        <h2>Waiting right now</h2>
+        <div class="corr" id="corr"></div>
+        <p class="small" id="savings"></p>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="card">
+        <h2 id="mineTitle">Your transfers</h2>
+        <div id="mine"></div>
+      </div>
+      <div class="card">
+        <h2>Balances</h2>
+        <table id="bals"></table>
+      </div>
+      <div class="card">
+        <h2>Activity</h2>
+        <div class="feed" id="feed"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const U = 10_000_000n;
+const WAITS = [["Instant", 30], ["2 min", 120], ["5 min", 300], ["15 min", 900], ["1 hour", 3600], ["6 hours", 21600]];
+const COUNTRY = { CA: "Canada", IN: "India" };
+let state = null, me = localGet("me") || "alice", wait = 120, busy = false;
+
+function localGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function localSet(k, v) { try { localStorage.setItem(k, v); } catch {} }
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function usd(s) {
+  const v = BigInt(s); const cents = (v * 100n + U / 2n) / U;
+  return `${(cents / 100n).toLocaleString()}.${(cents % 100n).toString().padStart(2, "0")}`;
+}
+const pct = (a, b) => (BigInt(b) === 0n ? 0 : Number((BigInt(a) * 10000n) / BigInt(b)) / 100);
+function ago(sec) {
+  if (sec <= 0) return "now";
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : m ? `${m}m ${s}s` : `${s}s`;
+}
+const person = (k) => state.people.find((p) => p.key === k);
+
+$("waits").innerHTML = WAITS.map(([l, s]) => `<button data-s="${s}">${l}</button>`).join("");
+$("waits").onclick = (e) => { const s = e.target.dataset.s; if (s) { wait = Number(s); render(); } };
+$("who").onclick = (e) => { const b = e.target.closest("button"); if (b) { me = b.dataset.k; localSet("me", me); render(); } };
+$("amount").oninput = render;
+$("to").onchange = render;
+
+$("go").onclick = async () => {
+  $("err").textContent = ""; busy = true; render();
+  try {
+    const r = await fetch("/api/send", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from: me, to: $("to").value, amount: $("amount").value, waitSeconds: wait, onExpiry: $("expiry").value }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error);
+  } catch (e) { $("err").textContent = e.message; }
+  busy = false; await poll();
+};
+
+async function cancel(id) {
+  const r = await fetch("/api/cancel", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+  const j = await r.json(); if (!r.ok) alert(j.error); poll();
+}
+
+function render() {
+  if (!state || !state.ready) return;
+  const mine = person(me);
+  $("net").textContent = `${state.network} · escrow ${state.escrow.slice(0, 6)}…${state.escrow.slice(-4)}`;
+  $("who").innerHTML = state.people.map((p) =>
+    `<button data-k="${p.key}" class="${p.key === me ? "on" : ""}">${esc(p.name)} · ${COUNTRY[p.region]}
+     <span class="bal">${usd(p.balance)} USDC</span></button>`).join("");
+
+  const others = state.people.filter((p) => p.region !== mine.region);
+  const keep = $("to").value;
+  $("to").innerHTML = others.map((p) => `<option value="${p.key}">${esc(p.name)} (${COUNTRY[p.region]})</option>`).join("");
+  if (others.some((p) => p.key === keep)) $("to").value = keep;
+  $("sendTitle").textContent = `Send money from ${COUNTRY[mine.region]} as ${mine.name}`;
+  [...$("waits").children].forEach((b) => b.classList.toggle("on", Number(b.dataset.s) === wait));
+  $("go").disabled = busy; $("go").textContent = busy ? "Submitting to testnet…" : "Lock USDC and send";
+
+  // what is waiting in each direction
+  const open = state.orders.filter((o) => o.status === "Open");
+  const sum = (from, to) => open.filter((o) => o.from === from && o.to === to).reduce((a, o) => a + BigInt(o.remaining), 0n);
+  const dest = others[0].region;
+  const opposite = sum(dest, mine.region);
+  let amt = 0n; try { amt = BigInt(Math.round(parseFloat($("amount").value || "0") * 100)) * (U / 100n); } catch {}
+  const now = amt < opposite ? amt : opposite;
+  $("hint").className = "hint" + (now > 0n ? "" : " none");
+  $("hint").textContent = now > 0n
+    ? `${usd(opposite)} USDC is waiting to go ${dest}→${mine.region}. About ${usd(now)} of yours could be matched on the next pass and paid out at once.`
+    : `Nobody is sending ${dest}→${mine.region} right now. Your transfer waits for a match; whatever is unmatched when time runs out follows your choice below.`;
+
+  $("corr").innerHTML = [["CA", "IN"], ["IN", "CA"]].map(([a, b]) =>
+    `<div><span class="small">${COUNTRY[a]} → ${COUNTRY[b]}</span><b>${usd(sum(a, b))}</b>
+     <span class="small">${open.filter((o) => o.from === a && o.to === b).length} open</span></div>`).join("");
+  const matched = state.orders.reduce((a, o) => a + BigInt(o.matched || 0), 0n);
+  $("savings").textContent = matched > 0n
+    ? `So far ${usd(matched)} USDC was matched in each direction, so ${usd(matched * 2n)} USDC was paid out locally instead of crossing a border. Fees collected: ${usd(state.treasuryBalance)} USDC (${state.feeBps / 100}% per matched side).`
+    : "Nothing matched yet.";
+
+  // my transfers (sent or incoming)
+  const rel = state.orders.filter((o) => o.owner === me || o.recipient === me).slice().reverse();
+  $("mineTitle").textContent = `${mine.name}'s transfers`;
+  $("mine").innerHTML = rel.length ? rel.map((o) => {
+    const sent = o.owner === me, other = person(sent ? o.recipient : o.owner);
+    const m = BigInt(o.matched || 0), rem = BigInt(o.remaining), total = BigInt(o.amount);
+    const released = total - m - rem;
+    const left = o.deadline - state.now;
+    const label = o.status === "Open" ? (m > 0n ? "Partly matched" : "Waiting for a match")
+                : o.status === "Filled" ? "Fully matched" : o.status === "Released" ? "Delivered" : "Refunded";
+    const fee = (m * BigInt(state.feeBps) + 9999n) / 10000n;
+    return `<div class="order">
+      <div class="row"><span>${sent ? "To" : "From"} <b>${esc(other.name)}</b> · ${COUNTRY[o.from]} → ${COUNTRY[o.to]} · #${o.id}</span>
+        <span class="pill ${o.status}">${label}</span></div>
+      <div class="row"><span class="amt">${usd(o.amount)} USDC</span>
+        <span class="small">${o.status === "Open" ? (left > 0 ? `${ago(left)} left to match` : "releasing…") : ""}</span></div>
+      <div class="bar"><span class="m" style="width:${pct(m, total)}%"></span><span class="r" style="width:${pct(released, total)}%"></span></div>
+      <div class="legend">
+        <span><i style="background:var(--good)"></i>Matched, paid locally: ${usd(m)}</span>
+        <span><i style="background:var(--accent)"></i>${o.onExpiry === "Refund" ? "Refunded or sent" : "Sent across"}: ${usd(released)}</span>
+        <span><i style="background:var(--wait)"></i>Waiting: ${usd(rem)}</span>
+      </div>
+      <div class="row small" style="margin-top:6px">
+        <span>${m > 0n ? `Fee on matched part: ${usd(fee)}` : "No fee unless matched"} · <a href="https://stellar.expert/explorer/${state.network}/tx/${o.hash}" target="_blank" rel="noopener">deposit tx</a></span>
+        ${sent && o.status === "Open" ? `<button class="link-btn" onclick="cancel('${o.id}')">Cancel and refund the rest</button>` : ""}
+      </div></div>`;
+  }).join("") : `<p class="empty">No transfers yet. Send one on the left, then switch to someone in the other country and send one back.</p>`;
+
+  const rows = [...state.people.map((p) => [`${p.name} (${COUNTRY[p.region]})`, p.balance]),
+    ["Escrow (locked)", state.escrowBalance], ["Fees (treasury)", state.treasuryBalance]];
+  $("bals").innerHTML = `<tr><th>Account</th><th class="n">USDC</th></tr>` +
+    rows.map(([n, b]) => `<tr><td>${esc(n)}</td><td class="n">${usd(b)}</td></tr>`).join("");
+
+  $("feed").innerHTML = state.activity.length ? state.activity.map((a) =>
+    `<div class="${a.kind}"><span class="small">${new Date(a.t * 1000).toLocaleTimeString()}</span> ${esc(a.text)}
+     ${a.link ? `<a href="${a.link}" target="_blank" rel="noopener">tx</a>` : ""}</div>`).join("")
+    : `<p class="empty">Waiting for activity…</p>`;
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state"); state = await r.json();
+    if (!state.ready) { $("net").textContent = "loading chain state…"; return; }
+    render();
+  } catch { $("net").textContent = "server offline"; }
+}
+poll(); setInterval(poll, 3000);
+</script>
+</body>
+</html>
