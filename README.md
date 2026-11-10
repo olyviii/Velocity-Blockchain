@@ -20,3 +20,4 @@ cd Velocity-Blockchain
 
 - `engine/` - Python netting engine. Run tests: `cd engine && python3 -I -m unittest discover -s tests -t .`
 - `docs/architecture.md` - design and status
+- `contracts/` - Soroban escrow contract. Test: `cd contracts && cargo test`; build: `stellar contract build`

@@ -49,8 +49,8 @@ fiat-pegged Stellar assets.
 | Piece | Where | Status |
 |---|---|---|
 | Netting engine (matching, FIFO, partial/full/instant, fallbacks, savings estimate) | `engine/netting` | built, 20 tests passing |
-| Escrow + settlement contract (Soroban, Rust) | `contracts/` | not started |
-| Rate source: SEP-40 oracle (Reflector) | read by contract and backend | not started |
+| Escrow + settlement contract (Soroban, Rust, SDK 29) | `contracts/escrow` | built, 14 tests passing, wasm builds (14.7 KB); not deployed |
+| Rate source: SEP-40 oracle (Reflector) | read by the contract (`lastprice`) | tested against a mock only; real feed not checked |
 | Backend API + order book (FastAPI, Postgres) | `backend/` | not started |
 | Path-payment router for remainders (stellar-sdk) | `backend/` | not started |
 | Frontend (Next.js + Freighter) | `frontend/` | not started |
@@ -91,4 +91,17 @@ fiat-pegged Stellar assets.
 - One reference rate per matching pass; no per-order price improvement.
 - No compliance layer. Moving value for other people can be a regulated
   activity; get legal advice before any real-money use.
-- The engine has not been run against a contract or Testnet yet.
+- The engine has not been run against the contract or Testnet yet, and the
+  contract has not been pointed at a real oracle. Testnet is on protocol 30
+  (checked 2026-11-10); the contract is built with soroban-sdk 29, the latest
+  stable release, which the Stellar skills say targets protocol 29.
+- The DEX fallback is client-side in v1: the sender calls `cancel` to get the
+  remainder back, then the app submits a path payment. A contract cannot submit
+  classic path-payment operations.
+- A fill reverts if a recipient has no trustline for the asset it receives.
+  The app must check trustlines before creating an order.
+- Mode FULL is enforced on-chain only within one `settle_batch`. A FULL order
+  has to be completed by a single batch.
+- Settlement is decided by the contract's own oracle rate, so the engine's rate
+  and the contract's can differ slightly between ticks. The engine proposes
+  pairs and sizes; the contract decides the amounts.
