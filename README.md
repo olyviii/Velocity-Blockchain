@@ -18,6 +18,8 @@ cd Velocity-Blockchain
 
 ## Layout
 
-- `engine/` - Python netting engine. Run tests: `cd engine && python3 -I -m unittest discover -s tests -t .`
-- `docs/architecture.md` - design and status
 - `contracts/` - Soroban escrow contract. Test: `cd contracts && cargo test`; build: `stellar contract build`
+- `engine/` - Python netting engine. Test: `cd engine && python3 -I -m unittest discover -s tests -t .`
+- `scripts/e2e_testnet.sh` - full check on Stellar testnet: unit tests, build, deploy, a real two-way transfer, balance asserts
+- `app/` - demo UI on testnet. `cd app && npm install && npm run setup && npm start`, then open http://localhost:5173
+- `docs/architecture.md` - design and status

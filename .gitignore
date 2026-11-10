@@ -9,3 +9,6 @@ target/
 __pycache__/
 *.pyc
 .venv/
+
+# demo app: holds testnet secret keys
+app/state.json

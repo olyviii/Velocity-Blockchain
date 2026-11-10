@@ -1,63 +1,60 @@
 """Data model for the netting engine.
 
-All amounts are integers in stroops (7 decimals), the same unit a SEP-41 token
-or classic Stellar asset uses on-chain. Floats are never used for money.
+Everything is USDC, 1:1. Amounts are integers in stroops (7 decimals), the
+unit the token uses on-chain. Floats are never used for money.
+
+An order sends USDC from one region to another (e.g. "CA" -> "IN"). Two orders
+flowing in opposite directions can be netted against each other.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
 
-SCALE = 10_000_000  # 7 decimal places; also the fixed-point scale of `rate`
+SCALE = 10_000_000  # 7 decimal places: one USDC
 BPS = 10_000        # basis points denominator
 
 
 class Mode(str, Enum):
-    INSTANT = "INSTANT"  # no waiting: one matching pass, then fallback immediately
-    PARTIAL = "PARTIAL"  # fill whatever is available, wait for the rest
-    FULL = "FULL"        # fill only if the whole order can be filled at once
+    INSTANT = "INSTANT"  # no waiting: one matching pass, then release immediately
+    PARTIAL = "PARTIAL"  # match whatever is available, wait for the rest
+    FULL = "FULL"        # match only if the whole order can be matched at once
 
 
 class Fallback(str, Enum):
-    ROUTE_DEX = "ROUTE_DEX"  # send the unmatched remainder through a Stellar path payment
-    REFUND = "REFUND"        # return the unmatched remainder to the sender
+    SEND_REMAINDER = "SEND_REMAINDER"  # at the deadline, send the rest across to the recipient
+    REFUND = "REFUND"                  # at the deadline, return the rest to the sender
 
 
 class Status(str, Enum):
     OPEN = "OPEN"
-    FILLED = "FILLED"        # nothing left to match (or handed to the DEX router)
-    CANCELLED = "CANCELLED"
+    FILLED = "FILLED"        # fully matched
+    RELEASED = "RELEASED"    # remainder sent to the recipient at the deadline
+    CANCELLED = "CANCELLED"  # remainder refunded to the sender
 
 
 @dataclass
 class Order:
-    """A funded order: `amount` of `sell_asset` is locked, sender wants `buy_asset`.
-
-    `min_receive` is the sender's signed floor for the whole order, in `buy_asset`
-    stroops (like `destMin` on a path payment). Partial fills must respect it pro rata.
-    """
+    """A funded order: `amount` USDC is locked, to be paid to `recipient` in `to_region`."""
 
     id: str
     owner: str
     recipient: str
-    sell_asset: str
-    buy_asset: str
+    from_region: str
+    to_region: str
     amount: int
-    min_receive: int
     created_at: int
     max_wait: int
     mode: Mode = Mode.PARTIAL
-    fallback: Fallback = Fallback.ROUTE_DEX
+    fallback: Fallback = Fallback.SEND_REMAINDER
     remaining: int = -1
     status: Status = Status.OPEN
 
     def __post_init__(self) -> None:
-        if self.sell_asset == self.buy_asset:
-            raise ValueError("sell_asset and buy_asset must differ")
+        if self.from_region == self.to_region:
+            raise ValueError("from_region and to_region must differ")
         if self.amount <= 0:
             raise ValueError("amount must be positive")
-        if self.min_receive < 0:
-            raise ValueError("min_receive cannot be negative")
         if self.max_wait < 0:
             raise ValueError("max_wait cannot be negative")
         if self.remaining < 0:
@@ -71,37 +68,32 @@ class Order:
 
 @dataclass(frozen=True)
 class Fill:
-    """One bilateral match. X sells asset A and buys B; Y sells B and buys A.
+    """One match of `amount` between X (a -> b) and Y (b -> a).
 
-    Conservation holds exactly, per asset:
-        A: x gives a_amount  == y receives (a_amount - fee_a) + fee_a
-        B: y gives b_amount  == x receives (b_amount - fee_b) + fee_b
+    X's deposit pays Y's recipient and Y's deposit pays X's recipient, each
+    `amount - fee`; the treasury gets `2 * fee`. Conservation is exact:
+        2 * amount == x_receives + y_receives + 2 * fee
     """
 
     x_order: str
     y_order: str
-    asset_a: str
-    asset_b: str
-    a_amount: int
-    b_amount: int
-    fee_a: int
-    fee_b: int
-    rate: int  # B per A, scaled by SCALE
+    amount: int
+    fee: int  # per side
 
     @property
     def x_receives(self) -> int:
-        return self.b_amount - self.fee_b
+        """What X's recipient gets."""
+        return self.amount - self.fee
 
     @property
     def y_receives(self) -> int:
-        return self.a_amount - self.fee_a
+        """What Y's recipient gets."""
+        return self.amount - self.fee
 
 
 @dataclass(frozen=True)
 class FallbackAction:
     order_id: str
     action: Fallback
-    sell_asset: str
-    buy_asset: str
-    amount: int  # unmatched remainder, in sell_asset stroops
-    min_receive: int  # pro-rata floor for the remainder
+    to: str      # recipient (SEND_REMAINDER) or owner (REFUND)
+    amount: int  # unmatched remainder
