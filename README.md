@@ -15,3 +15,8 @@ cd Velocity-Blockchain
 2. Create a branch: `git checkout -b your-feature`
 3. Commit and push: `git push -u origin your-feature`
 4. Open a pull request on GitHub
+
+## Layout
+
+- `engine/` - Python netting engine. Run tests: `cd engine && python3 -I -m unittest discover -s tests -t .`
+- `docs/architecture.md` - design and status

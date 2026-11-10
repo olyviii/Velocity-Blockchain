@@ -6,3 +6,6 @@ target/
 *.log
 .vscode/
 .idea/
+__pycache__/
+*.pyc
+.venv/
